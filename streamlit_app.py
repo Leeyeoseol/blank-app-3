@@ -1,200 +1,188 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import requests
 import datetime
 import plotly.express as px
 import plotly.graph_objects as go
-from io import StringIO
-import time
+import requests
+import json
 
-# ---------------------------
-# 페이지 및 폰트 설정
-# ---------------------------
-st.set_page_config(page_title="해수면 상승 종합 대시보드", layout="wide", initial_sidebar_state="expanded")
+# =====================================================================================
+# 1. 페이지 및 폰트 설정
+# =====================================================================================
+st.set_page_config(
+    page_title="기후변화 국내 영향 대시보드",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# Pretendard 폰트 설정 시도
+# Pretendard 폰트 적용 시도
 try:
     import matplotlib.font_manager as fm
     import matplotlib.pyplot as plt
-    import seaborn as sns
-    fm.fontManager.addfont("./fonts/Pretendard-Bold.ttf")
+    font_path = "./fonts/Pretendard-Bold.ttf"
+    fm.fontManager.addfont(font_path)
     plt.rc('font', family='Pretendard')
-    sns.set(font="Pretendard")
+    st.markdown(f"""
+        <style>
+        @font-face {{
+            font-family: 'Pretendard';
+            src: url('{font_path}') format('truetype');
+        }}
+        html, body, [class*="st-"], [class*="css-"] {{ font-family: 'Pretendard', sans-serif; }}
+        </style>""", unsafe_allow_html=True)
 except Exception:
     pass
 
-# ===========================
-# 사이드바: 시나리오 설정
-# ===========================
-st.sidebar.header("⚙️ 미래 시나리오 설정")
-scenario = st.sidebar.radio(
-    "기후변화 시나리오를 선택하세요:",
-    ('현 추세 유지 (RCP 4.5)', '상황 악화 (RCP 8.5)', '개선 노력 (RCP 2.6)'),
-    help="선택한 시나리오에 따라 국내 데이터 및 미래 예측이 변경됩니다."
-)
+# =====================================================================================
+# 2. 데이터 합성 및 대시보드 구현
+# =====================================================================================
 
-scenario_multipliers = {
-    '현 추세 유지 (RCP 4.5)': {'sea': 1.0, 'warming': 1.0, 'future': 1.0},
-    '상황 악화 (RCP 8.5)': {'sea': 1.5, 'warming': 1.5, 'future': 1.8},
-    '개선 노력 (RCP 2.6)': {'sea': 0.7, 'warming': 0.6, 'future': 0.5}
-}
-multiplier = scenario_multipliers[scenario]
+@st.cache_data
+def synthesize_user_data():
+    """프롬프트 입력을 기반으로 데이터프레임을 합성합니다."""
+    datasets = {}
+    current_year = datetime.datetime.now().year
 
+    # 1. 한국 해수면 상승 데이터
+    years_kr = np.arange(1990, current_year + 1)
+    base_rise = np.linspace(0, (len(years_kr) - 1) * 3.05, len(years_kr))
+    df_kr_sea = pd.DataFrame({"date": pd.to_datetime([f"{y}-01-01" for y in years_kr]), "value": base_rise + np.random.randn(len(years_kr)).cumsum() * 0.5, "year": years_kr})
+    datasets['korea_sea_level'] = df_kr_sea
 
-# ===========================
-# 대시보드 제목 및 소개
-# ===========================
-st.title("🌊 높아지는 바다, 우리 식탁의 미래는?")
-st.markdown("""
-본 대시보드는 해수면 상승이라는 전 지구적 현상을 데이터로 분석하고, 이것이 한국의 수산업과 식생활에 미치는 영향을 다각도로 조명합니다.
-**사이드바에서 미래 시나리오를 선택**하여 우리의 선택이 가져올 변화를 직접 확인해 보세요.
-""")
+    # 2. 어종 변화 (명태 vs 방어) 데이터
+    years_fish = np.arange(2015, current_year + 1)
+    df_fish = pd.DataFrame({"year": years_fish, "어종": "명태", "어획량": np.linspace(100, 10, len(years_fish)) * np.random.uniform(0.8, 1.2, len(years_fish))})
+    df_fish = pd.concat([df_fish, pd.DataFrame({"year": years_fish, "어종": "방어", "어획량": np.linspace(30, 90, len(years_fish)) * np.random.uniform(0.8, 1.2, len(years_fish))})])
+    datasets['fish_change'] = df_fish
 
-with st.expander("📑 보고서 핵심 내용 살펴보기"):
-    st.markdown("""
-    #### 문제 제기
-    최근 30년간 한국 연안의 해수면은 평균 10cm 이상 상승했습니다. 기후변화로 인해 바닷물의 온도가 변하면서 어획량이 감소하고, 우리가 일상적으로 접하는 수산물의 가격도 꾸준히 오르고 있습니다. 이러한 현상은 단순히 어업계의 문제가 아니라, 매일의 식생활과 건강에 직결되는 문제입니다.
-
-    #### 변화하는 밥상
-    경향신문 보도에 따르면, 한반도 주변 해수온은 전 지구 평균보다 2배 빠른 속도로 상승하고 있습니다. 그 결과, ‘명태는 사라지고 방어가 늘어났다’는 기사처럼 한국인의 밥상 구성이 바뀌고 있으며, 이는 청소년의 영양 불균형으로까지 이어질 수 있습니다.
-    """)
-
-# ===========================
-# 1. 전 세계 해수면 변화 (Global View)
-# ===========================
-st.header("🌍 전 세계는 지금: 해수면 상승 현황")
-
-@st.cache_data(ttl=3600)
-def load_public_sea_level_data():
-    """
-    NOAA: 전 세계 평균 해수면 데이터 불러오기 (출처: https://www.ncei.noaa.gov/access/monitoring/data/sea-level-rise/gmsl/)
-    """
-    data_url = "https://www.star.nesdis.noaa.gov/sod/lsa/SeaLevelRise/slr/slr_sla_gbl_free_txj1j2_90.csv"
-    try:
-        r = requests.get(data_url, timeout=10)
-        if r.status_code == 200:
-            csv_data = r.text
-            data_io = StringIO('\n'.join(csv_data.splitlines()[5:]))
-            df = pd.read_csv(data_io, header=None, names=['year', 'altimeter_type', 'num_observations', 'num_weighted_obs', 'gmsl_variation_mm', 'gmsl_variation_sd', 'gmsl_variation_sm_mm', 'gmsl_variation_sm_sd', 'gmsl_GIA_mm', 'gmsl_GIA_sd', 'gmsl_GIA_sm_mm', 'gmsl_GIA_sm_sd'])
-            df['date'] = pd.to_datetime(df['year'], format='%Y', errors='coerce')
-            df = df[['date', 'gmsl_GIA_sm_mm']].rename(columns={"gmsl_GIA_sm_mm": "sea_level_mm"})
-            df = df.dropna(subset=["date", "sea_level_mm"])
-            df = df[df['date'].dt.date < datetime.date.today()].copy()
-            first_value = df.loc[df['date'].idxmin(), 'sea_level_mm']
-            df['sea_level_mm'] = df['sea_level_mm'] - first_value
-            return df.sort_values("date").reset_index(drop=True)
-    except Exception as e:
-        st.warning(f"⚠️ 공식 데이터 로드 실패 ({e}). 예시 데이터를 사용합니다.")
+    # 3. 낙지 어획량과 가격 변화 데이터
+    years_oct = np.arange(2018, current_year + 1)
+    catch = np.linspace(120, 50, len(years_oct)) * np.random.uniform(0.9, 1.1, len(years_oct))
+    price = 1 / catch * 5000 + np.random.randn(len(years_oct)) * 10
+    df_octopus = pd.DataFrame({"date": pd.to_datetime([f"{y}-01-01" for y in years_oct]), "어획량 (톤)": catch, "평균 가격 (원)": price, "year": years_oct})
+    datasets['octopus_economics'] = df_octopus
     
-    years = list(range(1993, datetime.datetime.now().year + 1))
-    values = np.linspace(0, (len(years) - 1) * 3.4, len(years))
-    return pd.DataFrame({"date": pd.to_datetime([f"{y}-01-01" for y in years]), "sea_level_mm": values})
+    # 4. 지도 시각화를 위한 지역별 데이터
+    map_data = {
+        'province': ['Seoul', 'Busan', 'Daegu', 'Incheon', 'Gwangju', 'Daejeon', 'Ulsan', 'Gyeonggi-do', 'Gangwon-do', 'Chungcheongbuk-do', 'Chungcheongnam-do', 'Jeollabuk-do', 'Jeollanam-do', 'Gyeongsangbuk-do', 'Gyeongsangnam-do', 'Jeju-do'],
+        'name_kor': ['서울특별시', '부산광역시', '대구광역시', '인천광역시', '광주광역시', '대전광역시', '울산광역시', '경기도', '강원도', '충청북도', '충청남도', '전라북도', '전라남도', '경상북도', '경상남도', '제주특별자치도'],
+        '해수면 상승 (cm)': [9.5, 12.1, 10.0, 11.2, 10.2, 9.8, 11.8, 10.8, 9.8, 9.2, 11.0, 10.7, 10.5, 11.2, 11.5, 12.5],
+        '주요 어업 영향': ['내륙', '고수온 양식업 피해', '내륙', '서해안 꽃게 어획량 급감', '내륙', '내륙', '고수온 및 어종 변화', '해안선 침식', '동해안 명태 어장 소실', '내륙', '서해안 어업 타격', '새만금 연안 생태계 변화', '서남해안 수산자원 변동', '동해안 오징어 어획량 감소', '남해안 어종 변화', '아열대성 어종 출현 증가']
+    }
+    datasets['regional_impact'] = pd.DataFrame(map_data)
 
-df_public = load_public_sea_level_data()
-last_data_point = df_public.iloc[-1]
-total_rise = last_data_point['sea_level_mm']
-total_years = last_data_point['date'].year - df_public.iloc[0]['date'].year
-avg_annual_rise = total_rise / total_years
+    # 5. 주요 수산물 7종 어획량 데이터
+    years_detail = np.arange(2010, current_year + 1)
+    df_seafood = pd.DataFrame()
+    
+    seafood_trends = {
+        '명태': np.linspace(80, 5, len(years_detail)) * np.random.uniform(0.7, 1.3, len(years_detail)),
+        '오징어': np.sin(np.linspace(0, 5*np.pi, len(years_detail)))*20 + np.linspace(70, 25, len(years_detail)),
+        '꽃게': np.sin(np.linspace(0, 8*np.pi, len(years_detail)))*5 + 20,
+        '낙지': np.linspace(40, 20, len(years_detail)) * np.random.uniform(0.8, 1.2, len(years_detail)),
+        '멸치': np.sin(np.linspace(0, 10*np.pi, len(years_detail)))*30 + np.linspace(220, 180, len(years_detail)),
+        '고등어': np.sin(np.linspace(0, 6*np.pi, len(years_detail)))*25 + 150,
+        '새우': np.linspace(50, 75, len(years_detail)) * np.random.uniform(0.9, 1.1, len(years_detail))
+    }
+    if 2024 in years_detail:
+        crab_idx_2024 = list(years_detail).index(2024)
+        crab_idx_start = list(years_detail).index(2019)
+        min_val = seafood_trends['꽃게'][crab_idx_start:crab_idx_2024+1].min()
+        seafood_trends['꽃게'][crab_idx_2024] = min_val * 0.9
 
-col1, col2, col3 = st.columns(3)
-col1.metric("최근 측정 연도", f"{last_data_point['date'].year}년")
-col2.metric("1993년 대비 총 상승량", f"{total_rise:.2f} mm")
-col3.metric("연평균 상승량", f"{avg_annual_rise:.2f} mm/year", "가속화 추세")
+    for name, data in seafood_trends.items():
+        temp_df = pd.DataFrame({'year': years_detail, '어종': name, '어획량 (천 톤)': np.clip(data, 0, None)})
+        df_seafood = pd.concat([df_seafood, temp_df])
+        
+    datasets['detailed_catch'] = df_seafood
 
-fig_public = px.area(df_public, x="date", y="sea_level_mm", title="전 세계 평균 해수면 상승 추이 (1993년 기준)", labels={"date":"연도","sea_level_mm":"해수면 상승량 (mm)"}, markers=True)
-st.plotly_chart(fig_public, use_container_width=True)
+    return datasets
 
-# ===========================
-# 2. 한국의 바다와 식탁 변화 (Korea Focus)
-# ===========================
-st.header(f"🇰🇷 한반도에 미치는 영향: <{scenario.split(' ')[0]}> 시나리오")
+# --- 대한민국 지도 GeoJSON 로드 ---
+@st.cache_data
+def load_korea_geojson():
+    url = "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/kostat/2018/json/skorea-provinces-2018-geo.json"
+    response = requests.get(url)
+    return response.json()
 
-# --- 시나리오 기반 가상 데이터 생성 ---
-base_year = 1990
-num_years = datetime.datetime.now().year - base_year + 1
-user_dates = pd.to_datetime(pd.date_range(start=f"{base_year}-01-01", periods=num_years, freq="Y"))
-
-sea_level_kr = np.linspace(0, 107 * (num_years / 35), num_years) * multiplier['sea']
-fish_production = 100 - (np.linspace(0, 25 * (num_years / 35), num_years) * multiplier['warming']) + np.random.randn(num_years) * 3
-fish_price = 100 + (np.linspace(0, 50 * (num_years / 35), num_years) * multiplier['warming']) + np.random.randn(num_years) * 5
-
-df_user = pd.DataFrame({"date": user_dates, "sea_level_mm": sea_level_kr, "fish_production_index": fish_production, "fish_price_index": fish_price})
-
-# --- 주요 어종 변화 시뮬레이션 ---
-st.subheader("🐟 우리 식탁의 단골 생선, 어떻게 변할까?")
-years_arr = df_user['date'].dt.year
-warming_factor = np.linspace(0, 1, len(years_arr)) * multiplier['warming']
-df_fish = pd.DataFrame({
-    '연도': np.tile(years_arr, 3),
-    '어종': ['명태 (한류성)'] * len(years_arr) + ['방어 (난류성)'] * len(years_arr) + ['꽃게'] * len(years_arr),
-    '어획량 지수': np.clip(np.concatenate([
-        100 - (warming_factor * 80 + np.random.randn(len(years_arr)) * 5),
-        100 + (warming_factor * 50 + np.random.randn(len(years_arr)) * 5),
-        100 - (warming_factor * 20 + np.sin(years_arr / 3) * 10 + np.random.randn(len(years_arr)) * 5)
-    ]), 0, 200) # 0 미만, 200 초과 값 방지
-})
-fig_fish = px.line(df_fish, x='연도', y='어획량 지수', color='어종', title='주요 어종 어획량 변화 시뮬레이션 (1990년=100)', markers=True)
-st.plotly_chart(fig_fish, use_container_width=True)
-
-# ===========================
-# 3. 미래 전망 및 지역별 영향
-# ===========================
-st.header("🔮 미래 전망과 지역별 영향")
-
-# --- 시나리오 기반 미래 예측 ---
-st.subheader(f"<{scenario.split(' ')[0]}> 시나리오에 따른 미래 해수면 예측")
-projection_years = 50
-future_dates = pd.date_range(start=last_data_point['date'], periods=projection_years + 1, freq='Y')
-df_future = pd.DataFrame({'date': future_dates})
-
-for sc, mult in scenario_multipliers.items():
-    projected_rise = [last_data_point['sea_level_mm'] + avg_annual_rise * mult['future'] * i for i in range(projection_years + 1)]
-    df_future[sc] = projected_rise
-
-fig_future = go.Figure()
-fig_future.add_trace(go.Scatter(x=df_public['date'], y=df_public['sea_level_mm'], name='관측 데이터', mode='lines', line=dict(color='black', width=3)))
-for sc in scenario_multipliers:
-    fig_future.add_trace(go.Scatter(
-        x=df_future['date'], y=df_future[sc], name=sc.split(' (')[0], 
-        line=dict(dash='dash', width=(4 if sc == scenario else 2)),
-        visible=(True if sc == scenario else 'legendonly'),
-        opacity=(1.0 if sc == scenario else 0.5)
-    ))
-fig_future.update_layout(title=f'시나리오별 전 세계 해수면 상승 예측', xaxis_title='연도', yaxis_title='해수면 상승량 (mm, 1993년 기준)', legend_title_text='시나리오')
-st.plotly_chart(fig_future, use_container_width=True)
-
-# --- 지도 시각화 ---
-st.subheader("연안 지역별 예측 해수면 상승량")
-selected_year = st.slider("지도 연도 선택", min_value=1990, max_value=2050, value=datetime.datetime.now().year, step=1)
-map_sea_level = np.linspace(0, 107 * ((2050-1990+1) / 35), 2051-1990+1) * multiplier['sea']
-coords = {"인천": {"lat": 37.4563, "lon": 126.7052}, "부산": {"lat": 35.1796, "lon": 129.0756}, "목포": {"lat": 34.8118, "lon": 126.3922}, "강릉": {"lat": 37.7519, "lon": 128.8761}, "제주": {"lat": 33.4996, "lon": 126.5312}}
-base_level = map_sea_level[selected_year - 1990]
-map_data = [{"city": city, "lat": c["lat"], "lon": c["lon"], "sea_level_mm": max(0, base_level + np.random.uniform(-5, 5))} for city, c in coords.items()]
-
-fig_map = px.scatter_mapbox(pd.DataFrame(map_data), lat="lat", lon="lon", color="sea_level_mm", size="sea_level_mm",
-    hover_name="city", hover_data={"sea_level_mm": ":.2f mm"}, color_continuous_scale=px.colors.sequential.OrRd,
-    size_max=30, zoom=5.5, mapbox_style="carto-positron", title=f"[{scenario.split(' ')[0]}] {selected_year}년 예측 해수면 상승량")
-fig_map.update_layout(margin={"r":0,"t":40,"l":0,"b":0}, legend_title_text='상승량(mm)')
-st.plotly_chart(fig_map, use_container_width=True)
-
-# ===========================
-# 4. 해결 방안 및 맺음말
-# ===========================
-st.header("💡 우리는 무엇을 할 수 있을까요?")
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.subheader("🙋‍♀️ 개인")
-    st.markdown("- **육류 소비 줄이기**: 탄소 배출이 많은 육류 대신 채소, 콩, 해조류 등 지속가능한 단백질원 섭취 늘리기\n- **에너지 절약**: 불필요한 전등 끄기, 대중교통 이용 등 일상 속 에너지 소비 줄이기\n- **기후변화에 관심 갖기**: 관련 뉴스나 보고서를 찾아보며 문제의 심각성을 인지하기")
-with col2:
-    st.subheader("🏫 학교/단체")
-    st.markdown("- **기후 친화적 급식**: 로컬푸드, 제철 식재료를 활용하여 탄소 발자국이 적은 급식 메뉴 개발\n- **기후변화 교육**: 데이터 기반의 체계적인 교육을 통해 학생들이 문제 해결의 주체로 성장하도록 돕기\n- **캠페인 활동**: '잔반 없는 날', '에너지 절약 주간' 등 공동체 캠페인 전개")
-with col3:
-    st.subheader("🏛️ 정부/사회")
-    st.markdown("- **해양생태계 보전**: 연안 습지 보호, 인공어초 설치 등 해양생태계 회복 정책 강화\n- **지속가능한 어업 지원**: 친환경 어업 기술 개발 지원 및 어업 규제 강화\n- **신재생에너지 전환**: 화석연료 의존도를 낮추고 태양광, 풍력 등 신재생에너지 비중 확대")
-
+# --- 대시보드 타이틀 ---
+st.title("🗺️ 기후변화가 국내 해양 생태계에 미치는 영향")
 st.markdown("---")
-st.success("""
-**맺음말**: 해수면 상승은 더 이상 먼 미래나 바닷가만의 문제가 아닙니다. 오늘 우리가 먹는 수산물부터 미래 세대의 식생활까지, 우리 삶 전반에 영향을 미치는 현재진행형 과제입니다. **데이터를 통해 현실을 직시하고, 지속 가능한 미래를 위한 지혜로운 해결책을 함께 모색해야 할 때입니다.**
-""")
+st.info("이 대시보드는 제공된 뉴스 기사 및 연구 자료를 바탕으로 구성한 **가상 데이터**를 시각화합니다.")
 
+# --- 데이터 및 GeoJSON 로드 ---
+datasets = synthesize_user_data()
+korea_geojson = load_korea_geojson()
+df_sea_level = datasets['korea_sea_level']; df_fish_change = datasets['fish_change']
+df_octopus = datasets['octopus_economics']; df_regional = datasets['regional_impact']
+df_detailed_catch = datasets['detailed_catch']
+
+# --- 사이드바 옵션 ---
+with st.sidebar:
+    st.header("⚙️ 표시 옵션")
+    min_year, max_year = df_sea_level['year'].min(), df_sea_level['year'].max()
+    selected_years = st.slider("분석 연도 범위 선택", min_year, max_year, (2015, max_year))
+
+# --- 데이터 필터링 ---
+sea_level_filtered = df_sea_level[(df_sea_level['year'] >= selected_years[0]) & (df_sea_level['year'] <= selected_years[1])]
+fish_change_filtered = df_fish_change[(df_fish_change['year'] >= selected_years[0]) & (df_fish_change['year'] <= selected_years[1])]
+octopus_filtered = df_octopus[(df_octopus['year'] >= selected_years[0]) & (df_octopus['year'] <= selected_years[1])]
+detailed_catch_filtered = df_detailed_catch[(df_detailed_catch['year'] >= selected_years[0]) & (df_detailed_catch['year'] <= selected_years[1])]
+
+# --- 대시보드 UI (탭) ---
+tabs = ["지역 및 전체 변화", "주요 어종 변화", "수산물 가격 변동", "주요 수산물 어획량"]
+tab1, tab2, tab3, tab4 = st.tabs(tabs)
+
+with tab1:
+    st.subheader("📍 국내 시/도별 해수면 상승 영향")
+    fig_map = px.choropleth_mapbox(df_regional, geojson=korea_geojson, locations='province', featureidkey="properties.name_eng", color='해수면 상승 (cm)', color_continuous_scale="Blues", mapbox_style="carto-positron", zoom=5.5, center={"lat": 36.3, "lon": 127.8}, opacity=0.6, hover_name='name_kor', hover_data={'주요 어업 영향': True, 'province': False})
+    fig_map.update_layout(margin={"r":0,"t":40,"l":0,"b":0}, title_text="시/도별 누적 해수면 상승 및 어업 영향 (35년 누적 가상 데이터)")
+    st.plotly_chart(fig_map, use_container_width=True)
+
+    st.markdown("---") # 구분선 추가
+    
+    st.subheader("📈 한반도 주변 해수면 상승 추이")
+    if not sea_level_filtered.empty:
+        c1, c2 = st.columns(2); c1.metric("🌊 35년간 총 상승량 (1990~2024)", "10.7 cm"); c2.metric("📊 연평균 상승률", "약 3.05 mm/yr")
+        fig_line = px.line(sea_level_filtered, x='date', y='value', title=f"{selected_years[0]}년-{selected_years[1]}년 한반도 연평균 해수면 높이 변화", labels={'date': '연도', 'value': '상대적 높이 (mm)'}, template="plotly_white")
+        st.plotly_chart(fig_line, use_container_width=True)
+        st.download_button("📥 데이터 다운로드", sea_level_filtered.to_csv(index=False, encoding='utf-8-sig'), "korea_sea_level.csv", key="sl")
+    else: st.warning("선택된 연도 범위에 데이터가 없습니다.")
+
+with tab2:
+    st.subheader("🎣 명태는 가고, 방어가 온다?")
+    if not fish_change_filtered.empty:
+        fig = px.bar(fish_change_filtered, x='year', y='어획량', color='어종', barmode='group', title=f"{selected_years[0]}년-{selected_years[1]}년 주요 어종 연간 어획량 변화 (가상)", labels={'year': '연도', '어획량': '어획량 (상대치)'}, color_discrete_map={'명태': '#3498db', '방어': '#e74c3c'}, template="plotly_white")
+        st.plotly_chart(fig, use_container_width=True)
+        st.download_button("📥 데이터 다운로드", fish_change_filtered.to_csv(index=False, encoding='utf-8-sig'), "fish_change.csv", key="fc")
+    else: st.warning("선택된 연도 범위에 데이터가 없습니다.")
+
+with tab3:
+    st.subheader("🐙 어획량 감소와 낙지 가격의 상관관계")
+    if not octopus_filtered.empty:
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=octopus_filtered['date'], y=octopus_filtered['어획량 (톤)'], name='어획량', yaxis='y1', marker_color='#3498db'))
+        fig.add_trace(go.Scatter(x=octopus_filtered['date'], y=octopus_filtered['평균 가격 (원)'], name='평균 가격', yaxis='y2', mode='lines+markers', line=dict(color='#e74c3c')))
+        fig.update_layout(title_text=f"{selected_years[0]}년-{selected_years[1]}년 낙지 어획량과 평균 가격 변화", template="plotly_white", xaxis_title="연도", yaxis=dict(title="어획량 (톤)"), yaxis2=dict(title="평균 가격 (원)", overlaying='y', side='right'), legend=dict(x=0.05, y=1.15, orientation='h'))
+        st.plotly_chart(fig, use_container_width=True)
+        st.download_button("📥 데이터 다운로드", octopus_filtered.to_csv(index=False, encoding='utf-8-sig'), "octopus_economics.csv", key="oe")
+    else: st.warning("선택된 연도 범위에 데이터가 없습니다.")
+
+with tab4:
+    st.subheader("🦑 주요 수산물 어획량 변화 추이")
+    if not detailed_catch_filtered.empty:
+        fig = px.line(
+            detailed_catch_filtered, 
+            x='year', 
+            y='어획량 (천 톤)', 
+            color='어종',
+            title=f"{selected_years[0]}년-{selected_years[1]}년 주요 수산물 어획량 추이",
+            labels={'year': '연도', '어획량 (천 톤)': '어획량 (천 톤)', '어종': '수산물'},
+            markers=True,
+            template="plotly_white"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        st.download_button("📥 데이터 다운로드", detailed_catch_filtered.to_csv(index=False, encoding='utf-8-sig'), "detailed_catch.csv", key="dc")
+    else:
+        st.warning("선택된 연도 범위에 데이터가 없습니다.")
